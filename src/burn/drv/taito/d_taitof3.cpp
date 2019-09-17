@@ -237,11 +237,7 @@ static void __fastcall f3_main_write_long(UINT32 a, UINT32 d)
 	}
 
 	if ((a & 0xfffffc) == 0xc80100) {
-		SekClose();
-		SekOpen(1);
-		SekReset();
-		SekClose();
-		SekOpen(0);
+		SekReset(1);
 		sound_cpu_in_reset = 1;
 		return;
 	}
@@ -270,11 +266,7 @@ static void __fastcall f3_main_write_word(UINT32 a, UINT16 d)
 	}
 
 	if ((a & 0xfffffc) == 0xc80100) {
-		SekClose();
-		SekOpen(1);
-		SekReset();
-		SekClose();
-		SekOpen(0);
+		SekReset(1);
 		sound_cpu_in_reset = 1;
 		return;
 	}
@@ -298,11 +290,7 @@ static void __fastcall f3_main_write_byte(UINT32 a, UINT8 d)
 	}
 
 	if ((a & 0xfffffc) == 0xc80100) {
-		SekClose();
-		SekOpen(1);
-		SekReset();
-		SekClose();
-		SekOpen(0);
+		SekReset(1);
 		sound_cpu_in_reset = 1;
 		return;
 	}
@@ -3955,7 +3943,7 @@ static INT32 spcinvdjInit()
 
 struct BurnDriver BurnDrvSpcinvdj = {
 	"spcinvdj", "spacedx", NULL, NULL, "1994",
-	"Space Invaders DX (Ver 2.6J 1994/09/14) (F3 Version)\0", NULL, "Taito Corporation", "Taito F3 System",
+	"Space Invaders DX (Ver 2.6J 1994/09/14) (F3 Version)\0", "Graphics issues in Cellophane mode - use parent!", "Taito Corporation", "Taito F3 System",
 	NULL, NULL, NULL, NULL,
 	BDF_GAME_WORKING | BDF_CLONE, 2, HARDWARE_TAITO_MISC, GBF_VERSHOOT, 0,
 	NULL, spcinvdjRomInfo, spcinvdjRomName, NULL, NULL, NULL, NULL, F3InputInfo, F3DIPInfo,

@@ -23,7 +23,7 @@ struct SekExt *SekExt[SEK_MAX] = { NULL, }, *pSekExt = NULL;
 INT32 nSekActive = -1;								// The cpu which is currently being emulated
 INT32 nSekCyclesTotal, nSekCyclesScanline, nSekCyclesSegment, nSekCyclesDone, nSekCyclesToDo;
 
-INT32 nSekCPUType[SEK_MAX], nSekCycles[SEK_MAX], nSekIRQPending[SEK_MAX];
+INT32 nSekCPUType[SEK_MAX], nSekCycles[SEK_MAX], nSekIRQPending[SEK_MAX], nSekRESETLine[SEK_MAX], nSekHALT[SEK_MAX];
 
 static INT32 core_idle(INT32 cycles)
 {
@@ -52,6 +52,7 @@ static void core_set_irq(INT32 cpu, INT32 line, INT32 state)
 
 cpu_core_config SekConfig =
 {
+	"68k",
 	SekOpen,
 	SekClose,
 	SekCheatRead,
@@ -218,7 +219,7 @@ unsigned int m68k_read16(unsigned int a)
 	{
 		if (a & 1)
 		{
-			return BURN_ENDIAN_SWAP_INT16((M68KReadByte(a + 0) * 256) + M68KReadByte(a + 1));
+			return BURN_ENDIAN_SWAP_INT16((m68k_read8(a + 0) * 256) + m68k_read8(a + 1));
 		}
 		else
 		{
@@ -258,8 +259,8 @@ void m68k_write16(unsigned int a, unsigned short d)
 		{
 			//	bprintf(PRINT_NORMAL, _T("write16 0x%08X\n"), a);
 			d = BURN_ENDIAN_SWAP_INT16(d);
-			M68KWriteByte(a + 0, d / 0x100);
-			M68KWriteByte(a + 1, d);
+			m68k_write8(a + 0, d / 0x100);
+			m68k_write8(a + 1, d);
 			return;
 		}
 		else
@@ -300,10 +301,10 @@ unsigned int m68k_read32(unsigned int a)
 
 		if (a & 1)
 		{
-			r  = M68KReadByte((a + 0)) * 0x1000000;
-			r += M68KReadByte((a + 1)) * 0x10000;
-			r += M68KReadByte((a + 2)) * 0x100;
-			r += M68KReadByte((a + 3));
+			r  = m68k_read8((a + 0)) * 0x1000000;
+			r += m68k_read8((a + 1)) * 0x10000;
+			r += m68k_read8((a + 2)) * 0x100;
+			r += m68k_read8((a + 3));
 
 			return BURN_ENDIAN_SWAP_INT32(r);
 		}
@@ -315,6 +316,7 @@ unsigned int m68k_read32(unsigned int a)
 			return BURN_ENDIAN_SWAP_INT32(r);
 		}
 	}
+
 	return pSekExt->ReadLong[(uintptr_t)pr](a);
 }
 
@@ -352,10 +354,10 @@ void m68k_write32(unsigned int a, unsigned int d)
 
 			d = BURN_ENDIAN_SWAP_INT32(d);
 
-			M68KWriteByte((a + 0), d / 0x1000000);
-			M68KWriteByte((a + 1), d / 0x10000);
-			M68KWriteByte((a + 2), d / 0x100);
-			M68KWriteByte((a + 3), d);
+			m68k_write8((a + 0), d / 0x1000000);
+			m68k_write8((a + 1), d / 0x10000);
+			m68k_write8((a + 2), d / 0x100);
+			m68k_write8((a + 3), d);
 
 			return;
 		}
@@ -537,6 +539,44 @@ extern "C" INT32 M68KTASCallback()
 }
 #endif
 
+// ## SekCPUPush() / SekCPUPop() ## internal helpers for sending signals to other 68k's
+struct m68kpstack {
+	INT32 nHostCPU;
+	INT32 nPushedCPU;
+};
+#define MAX_PSTACK 10
+
+static m68kpstack pstack[MAX_PSTACK];
+static INT32 pstacknum = 0;
+
+static void SekCPUPush(INT32 nCPU)
+{
+	m68kpstack *p = &pstack[pstacknum++];
+
+	if (pstacknum + 1 >= MAX_PSTACK) {
+		bprintf(0, _T("SekCPUPush(): out of stack!  Possible infinite recursion?  Crash pending..\n"));
+	}
+
+	p->nPushedCPU = nCPU;
+
+	p->nHostCPU = SekGetActive();
+
+	if (p->nHostCPU != p->nPushedCPU) {
+		if (p->nHostCPU != -1) SekClose();
+		SekOpen(p->nPushedCPU);
+	}
+}
+
+static void SekCPUPop()
+{
+	m68kpstack *p = &pstack[--pstacknum];
+
+	if (p->nHostCPU != p->nPushedCPU) {
+		SekClose();
+		if (p->nHostCPU != -1) SekOpen(p->nHostCPU);
+	}
+}
+
 // ----------------------------------------------------------------------------
 // Initialisation/exit/reset
 
@@ -616,6 +656,15 @@ void SekNewFrame()
 		nSekCycles[i] = 0;
 	}
 
+#ifdef EMU_C68K
+	if ((nSekCpuCore == SEK_CORE_C68K) && nSekCPUType[nSekActive] == 0x68000) {
+		nSekCyclesToDo = c68k[nSekActive].cycles = 0;
+	} else {
+#endif
+		nSekCyclesToDo = m68k_ICount = 0;
+#ifdef EMU_C68K
+	}
+#endif
 	nSekCyclesTotal = 0;
 }
 
@@ -772,6 +821,8 @@ INT32 SekInit(INT32 nCount, INT32 nCPUType)
 
 	nSekCycles[nCount] = 0;
 	nSekIRQPending[nCount] = 0;
+	nSekRESETLine[nCount] = 0;
+	nSekHALT[nCount] = 0;
 
 	nSekCyclesTotal = 0;
 	nSekCyclesScanline = 0;
@@ -855,12 +906,31 @@ void SekReset()
 
 }
 
+void SekReset(INT32 nCPU)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekReset called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	SekReset();
+
+	SekCPUPop();
+}
+
 // ----------------------------------------------------------------------------
 // Control the active CPU
 
 // Open a CPU
 void SekOpen(const INT32 i)
 {
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekOpen called without init\n"));
+	if (i > nSekCount) bprintf(PRINT_ERROR, _T("SekOpen called with invalid index %x\n"), i);
+	if (nSekActive != -1) bprintf(PRINT_ERROR, _T("SekOpen called when CPU already open (%x) with index %x\n"), nSekActive, i);
+#endif
+
 	if (i != nSekActive) {
 		nSekActive = i;
 
@@ -922,9 +992,153 @@ INT32 SekShouldInterrupt(void)
 	}
 }
 
-// Set the status of an IRQ line on the active CPU
-void SekSetIRQLine(const INT32 line, const INT32 nstatus)
+INT32 SekGetRESETLine()
 {
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekGetRESETLine called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekGetRESETLine called when no CPU open\n"));
+#endif
+
+
+	if (nSekActive != -1)
+	{
+		return nSekRESETLine[nSekActive];
+	}
+
+	return 0;
+}
+
+INT32 SekGetRESETLine(INT32 nCPU)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekGetRESETLine called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	INT32 rc = SekGetRESETLine();
+
+	SekCPUPop();
+
+	return rc;
+}
+
+void SekSetRESETLine(INT32 nStatus)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetRESETLine called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekSetRESETLine called when no CPU open\n"));
+#endif
+
+	if (nSekActive != -1)
+	{
+		if (nSekRESETLine[nSekActive] && nStatus == 0)
+		{
+			SekReset();
+			//bprintf(0, _T("SEK: cleared resetline.\n"));
+		}
+
+		nSekRESETLine[nSekActive] = nStatus;
+	}
+}
+
+void SekSetRESETLine(INT32 nCPU, INT32 nStatus)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetRESETLine called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	SekSetRESETLine(nStatus);
+
+	SekCPUPop();
+}
+
+INT32 SekGetHALT()
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekGetHALT called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekGetHALT called when no CPU open\n"));
+#endif
+
+
+	if (nSekActive != -1)
+	{
+		return nSekHALT[nSekActive];
+	}
+
+	return 0;
+}
+
+INT32 SekGetHALT(INT32 nCPU)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekGetHALT called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	INT32 rc = SekGetHALT();
+
+	SekCPUPop();
+
+	return rc;
+}
+
+INT32 SekTotalCycles(INT32 nCPU)
+{
+	SekCPUPush(nCPU);
+
+	INT32 rc = SekTotalCycles();
+
+	SekCPUPop();
+
+	return rc;
+}
+
+void SekSetHALT(INT32 nStatus)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetHALT called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekSetHALT called when no CPU open\n"));
+#endif
+
+	if (nSekActive != -1)
+	{
+		if (nSekHALT[nSekActive] && nStatus == 0)
+		{
+			//bprintf(0, _T("SEK: cleared HALT.\n"));
+		}
+
+		nSekHALT[nSekActive] = nStatus;
+	}
+}
+
+void SekSetHALT(INT32 nCPU, INT32 nStatus)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetHALT called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	SekSetHALT(nStatus);
+
+	SekCPUPop();
+}
+
+// Set the status of an IRQ line on the active CPU
+void SekSetIRQLine(const INT32 line, INT32 nstatus)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetIRQLine called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekSetIRQLine called when no CPU open\n"));
+#endif
+
+	if (nstatus == CPU_IRQSTATUS_HOLD)
+		nstatus = CPU_IRQSTATUS_AUTO; // on sek, AUTO is HOLD.
+
 	INT32 status = nstatus << 12; // needed for compatibility
 
 	if (status) {
@@ -969,6 +1183,83 @@ void SekSetIRQLine(const INT32 line, const INT32 nstatus)
 	}
 #endif
 
+}
+
+void SekSetIRQLine(INT32 nCPU, const INT32 line, INT32 status)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetIRQLine called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	SekSetIRQLine(line, status);
+
+	SekCPUPop();
+}
+
+void SekSetVIRQLine(const INT32 line, INT32 nstatus)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetIRQLine called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekSetIRQLine called when no CPU open\n"));
+#endif
+
+	if (nstatus != 0 && nstatus != 1) {
+		bprintf(0, _T("SekSetVIRQLine(%d, %d); only supports ACK or NONE! \n"), line, nstatus);
+		return;
+	}
+
+	INT32 status = nstatus << 12; // needed for compatibility
+
+	if (status) {
+		nSekIRQPending[nSekActive] = line | status;
+
+#ifdef EMU_C68K
+		if ((nSekCpuCore == SEK_CORE_C68K) && nSekCPUType[nSekActive] == 0x68000) {
+			// is there an equivalent to m68k_set_virq in cyclone ?
+		} else {
+#endif
+
+#ifdef EMU_M68K
+			m68k_set_virq(line, 1);
+#endif
+
+#ifdef EMU_C68K
+		}
+#endif
+
+		return;
+	}
+
+	nSekIRQPending[nSekActive] = 0;
+
+#ifdef EMU_C68K
+	if ((nSekCpuCore == SEK_CORE_C68K) && nSekCPUType[nSekActive] == 0x68000) {
+		// is there an equivalent to m68k_set_virq in cyclone ?
+	} else {
+#endif
+
+#ifdef EMU_M68K
+		m68k_set_virq(line, 0);
+#endif
+
+#ifdef EMU_C68K
+	}
+#endif
+}
+
+void SekSetVIRQLine(INT32 nCPU, const INT32 line, INT32 status)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekSetVIRQLine called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	SekSetVIRQLine(line, status);
+
+	SekCPUPop();
 }
 
 // Adjust the active CPU's timeslice
@@ -1037,21 +1328,28 @@ INT32 SekRun(const INT32 nCycles)
 		//printf("EMU_C68K: SekRun\n");
 		nSekCyclesDone = 0;
 		nSekCyclesSegment = nCycles;
-		do {
-			c68k[nSekActive].cycles = nSekCyclesToDo = nSekCyclesSegment - nSekCyclesDone;
 
-			if (c68k[nSekActive].irq == 0x80) {						// Cpu is in stopped state till interrupt
-				nSekCyclesDone = nSekCyclesSegment;
-				nSekCyclesTotal += nSekCyclesSegment;
-			} else {
-				CycloneRun(&c68k[nSekActive]);
-				nSekCyclesDone += nSekCyclesToDo - c68k[nSekActive].cycles;
-				nSekCyclesTotal += nSekCyclesToDo - c68k[nSekActive].cycles;
-			}
-		} while (nSekCyclesDone < nSekCyclesSegment);
+		if (nSekRESETLine[nSekActive] || nSekHALT[nSekActive])
+		{
+			nSekCyclesSegment = nCycles; // idle when RESET high or halted
+		}
+		else
+		{
+			do {
+				c68k[nSekActive].cycles = nSekCyclesToDo = nSekCyclesSegment - nSekCyclesDone;
 
-		nSekCyclesSegment = nSekCyclesDone;
-		nSekCyclesToDo = c68k[nSekActive].cycles = -1;
+				if (c68k[nSekActive].irq == 0x80) {						// Cpu is in stopped state till interrupt
+					nSekCyclesDone = nSekCyclesSegment;
+					nSekCyclesTotal += nSekCyclesSegment;
+				} else {
+					CycloneRun(&c68k[nSekActive]);
+					nSekCyclesDone += nSekCyclesToDo - c68k[nSekActive].cycles;
+					nSekCyclesTotal += nSekCyclesToDo - c68k[nSekActive].cycles;
+				}
+			} while (nSekCyclesDone < nSekCyclesSegment);
+			nSekCyclesSegment = nSekCyclesDone;
+		}
+		nSekCyclesToDo = c68k[nSekActive].cycles = 0; // was -1; changed june26, 2019 -dink
 		nSekCyclesDone = 0;
 
 		return nSekCyclesSegment;								// Return the number of cycles actually done
@@ -1059,18 +1357,43 @@ INT32 SekRun(const INT32 nCycles)
 #endif
 
 #ifdef EMU_M68K
-		//printf("EMU_M68K: SekRun\n");
 		nSekCyclesToDo = nCycles;
-		nSekCyclesSegment = m68k_execute(nCycles);
+
+		if (nSekRESETLine[nSekActive])
+		{
+			nSekCyclesSegment = nCycles; // idle when RESET high
+		}
+		else
+		{
+			nSekCyclesSegment = m68k_execute(nCycles);
+		}
+
 		nSekCyclesTotal += nSekCyclesSegment;
-		nSekCyclesToDo = m68k_ICount = -1;
+		nSekCyclesToDo = m68k_ICount = 0;
 		return nSekCyclesSegment;
+#else
+		return 0;
 #endif
 
 #ifdef EMU_C68K
 	}
 #endif
 
+}
+
+INT32 SekRun(INT32 nCPU, INT32 nCycles)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekRun called without init\n"));
+#endif
+
+	SekCPUPush(nCPU);
+
+	INT32 nRet = SekRun(nCycles);
+
+	SekCPUPop();
+
+	return nRet;
 }
 
 // ----------------------------------------------------------------------------
@@ -1283,6 +1606,20 @@ UINT32 SekGetPC(INT32)
 
 }
 
+UINT32 SekGetPPC(INT32)
+{
+#if defined FBNEO_DEBUG
+	if (!DebugCPU_SekInitted) bprintf(PRINT_ERROR, _T("SekGetPC called without init\n"));
+	if (nSekActive == -1) bprintf(PRINT_ERROR, _T("SekGetPC called when no CPU open\n"));
+#endif
+
+#ifdef EMU_M68K
+		return m68k_get_reg(NULL, M68K_REG_PPC);
+#else
+		return 0;
+#endif
+}
+
 INT32 SekDbgGetCPUType()
 {
 	switch (nSekCPUType[nSekActive]) {
@@ -1339,6 +1676,8 @@ INT32 SekScan(INT32 nAction)
 		SCAN_VAR(nSekCPUType[i]);
 		SCAN_VAR(nSekIRQPending[i]);
 		SCAN_VAR(nSekCycles[i]);
+		SCAN_VAR(nSekRESETLine[i]);
+		SCAN_VAR(nSekHALT[i]);
 
 #ifdef EMU_C68K
 		if ((nSekCpuCore == SEK_CORE_C68K) && nSekCPUType[i] == 0x68000) {
