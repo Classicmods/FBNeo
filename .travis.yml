@@ -23,4 +23,4 @@ script:
   - docker exec -it --privileged crosscomp bash -c "cd ${TRAVIS_REPO_SLUG}/src/burner/libretro && classic_make_${TARGET} Makefile clean"
   - docker exec -it --privileged crosscomp bash -c "cd ${TRAVIS_REPO_SLUG}/src/burner/libretro && classic_make_${TARGET} Makefile"
   - docker exec -it --privileged crosscomp bash -c "chown 600 ~/.keys/release_private_key.pem"
-  - docker exec -it --privileged crosscomp bash -c "cd ${TRAVIS_REPO_SLUG} && echo -e  'cd /var/www/html/cores/Automated_Builds/${CLOUD_DIR}\nput ${TARGETBUILD}.so' | sftp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ~/.keys/release_private_key.pem docker@classicmodscloud.com"
+  - docker exec -it --privileged crosscomp bash -c "cd ${TRAVIS_REPO_SLUG}/src/burner/libretro && echo -e  'cd /var/www/html/cores/Automated_Builds/${CLOUD_DIR}\nput ${TARGETBUILD}.so' | sftp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ~/.keys/release_private_key.pem docker@classicmodscloud.com"
